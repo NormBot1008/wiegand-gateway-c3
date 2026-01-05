@@ -58,17 +58,26 @@ Lade die Datei `wiegand\_gateway.yaml` herunter und flashe sie auf deinen ESP32-
 
 \### 3. Home Assistant Sensor
 
-Erstelle in deiner `configuration.yaml` einen MQTT-Sensor, damit Home Assistant die Daten verarbeiten kann:
+
+
+### 🔐 Sicherheitshinweis: Web-Interface schützen
+Standardmäßig ist das Web-Interface des Gateways ohne Passwort erreichbar, um die Ersteinrichtung zu erleichtern. Für den produktiven Einsatz empfehle ich dringend, einen Passwortschutz zu aktivieren.
+
+Im bereitgestellten ESPHome-Code findest du im Bereich `web_server:` vorbereitete Zeilen für `auth`. Entferne einfach die Kommentarzeichen (`#`) und setze dein eigenes Passwort:
 
 ```yaml
+web_server:
+  port: 80
+  auth:
+    username: admin
+    password: DEIN_SICHERES_PASSWORT
 
+
+# Beispiel für die configuration.yaml
 mqtt:
-
-&nbsp; sensor:
-
-&nbsp;   - name: "Wiegand Scanner"
-
-&nbsp;     state\_topic: "wiegand/DEIN\_ORT/event"
-
-&nbsp;     value\_template: "{{ value\_json.value }}"
-
+  sensor:
+    - name: "Wiegand Scanner"
+      state_topic: "wiegand/DEIN_ORT/event"
+      value_template: "{{ value_json.value }}"
+      # WICHTIG: Verhindert, dass jeder Scan das HA-Logbuch füllt
+      # Das Blueprint übernimmt das saubere Logging selbst!
