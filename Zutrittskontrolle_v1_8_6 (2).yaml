@@ -1,0 +1,288 @@
+blueprint:
+  name: 🔑 Zutrittskontrolle (Wiegand via MQTT) v1.8.6
+  description: >
+    ### 🔑 ZUTRITTSKONTROLLE [v1.8.6]
+    
+    **Features:**
+    * 🚀 **Performance:** Parallele Hardware- & Cloud-Steuerung.
+    * 🔒 **Sicherheit:** Alarmo-Sperre (Zutritt verweigert bei aktiver Anlage).
+    * 📱 **Messaging:** WhatsApp (vorbelegt) & Push-Benachrichtigungen.
+    * 📝 **Logging:** Klare Status-Meldungen im HA-Logbuch.
+    * 📋 **Multi-Log:** Speichert die letzten 5 Ereignisse als Liste im Text-Helfer.
+    * 🔔 **Glocke:** System-Benachrichtigung bei Abweisung.
+  domain: automation
+  input:
+    # 1. Name & Codes
+    name_label:
+      name: Name der Person
+      description: "Name der Person für die Benachrichtigung & Logs (z.B. 'NormBot')."
+    primary_code:
+      name: Referenzcode (z.B. PIN)
+      description: "Der numerische Code oder PIN am Keypad."
+    rfid_code:
+      name: RFID Code (Optional)
+      description: "Die ID des RFID-Chips oder NFC-Tags."
+      default: ""
+
+    # 2. Sensor & Sicherheit (Alarmo)
+    wiegand_sensor:
+      name: Wiegand Sensor Entität (MQTT)
+      description: "Die Entität des Sensors, der die Daten empfängt."
+      selector:
+        entity:
+          domain: sensor
+    alarmo_entity:
+      name: Alarmo Panel (Optional)
+      description: "Sperrt den Zutritt, wenn die Anlage scharf ist."
+      default: none
+      selector:
+        entity:
+          domain: alarm_control_panel
+
+    # 3. Benachrichtigungen
+    whatsapp_service:
+      name: WhatsApp Dienstname (Optional)
+      description: "Ergänze den Namen deines Dienstes (z.B. 'privat' für 'whatsapp_privat')."
+      default: "whatsapp_"
+      selector:
+        text: {}
+    notify_device:
+      name: Handy Push-Geräte (Optional)
+      description: "Wähle Smartphones für Push-Nachrichten aus."
+      default: []
+      selector:
+        device:
+          filter:
+            - integration: mobile_app
+          multiple: true
+    notification_action_text:
+      name: Aktionstext für Benachrichtigung
+      description: "Vorgabe: 'hat das Gebäude betreten'."
+      default: "hat das Gebäude betreten"
+      selector:
+        text: {}
+
+    # 4. Ausgänge (Hardware)
+    target_action_pulse:
+      name: 1. Rückmelde Feedback (Puls)
+      description: "Kurzer Impuls für Summer/LED."
+      default: {}
+      selector:
+        target:
+    target_action_timed:
+      name: 2. Getakteter Ausgang (Tor/Schloss)
+      description: "Hauptausgang für den Türöffner."
+      default: {}
+      selector:
+        target:
+    delay_seconds:
+      name: Schaltzeit (Sekunden)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: s
+          mode: slider
+    target_action_static:
+      name: 3. Statischer Ausgang
+      description: "Zusätzliche Schaltung (z.B. Flurlicht)."
+      default: {}
+      selector:
+        target:
+    static_action_mode:
+      name: Aktion für Statischen Ausgang
+      default: "turn_on"
+      selector:
+        select:
+          options:
+            - {label: Einschalten, value: "turn_on"}
+            - {label: Ausschalten, value: "turn_off"}
+            - {label: Umschalten (Toggle), value: "toggle"}
+
+    # 5. Zeitsteuerung
+    enable_time_check:
+      name: "⏰ Zeitsteuerung aktivieren?"
+      default: false
+      selector:
+        boolean: {}
+    start_time:
+      name: Startzeit
+      default: "08:00:00"
+      selector:
+        time: {}
+    end_time:
+      name: Endzeit
+      default: "17:00:00"
+      selector:
+        time: {}
+    workdays:
+      name: Gültige Wochentage
+      default: [mon, tue, wed, thu, fri, sat, sun]
+      selector:
+        select:
+          multiple: true
+          options:
+            - {label: Montag, value: mon}
+            - {label: Dienstag, value: tue}
+            - {label: Mittwoch, value: wed}
+            - {label: Donnerstag, value: thu}
+            - {label: Freitag, value: fri}
+            - {label: Samstag, value: sat}
+            - {label: Sonntag, value: sun}
+
+    # 6. Auswertung (Ganz unten)
+    log_helper:
+      name: Log-Helfer (Optional)
+      description: "Text-Helfer (input_text). Speichert die letzten 5 Ereignisse als Liste."
+      default: ""
+      selector:
+        entity:
+          domain: input_text
+
+mode: parallel
+
+variables:
+  person_name: !input name_label
+  action_text: !input notification_action_text
+  p_code: !input primary_code
+  r_code: !input rfid_code
+  wa_service: !input whatsapp_service
+  notify_dev: !input notify_device
+  t_action_1: !input target_action_timed
+  t_action_2: !input target_action_static
+  t_action_3: !input target_action_pulse
+  t_delay: !input delay_seconds
+  action_mode: !input static_action_mode
+  time_check_active: !input enable_time_check
+  start_t: !input start_time
+  end_t: !input end_time
+  days_allowed: !input workdays
+  alarm_panel: !input alarmo_entity
+  w_sensor: !input wiegand_sensor
+  dash_log: !input log_helper
+
+trigger:
+  - platform: state
+    entity_id: !input wiegand_sensor
+
+condition:
+  - condition: template
+    value_template: "{{ states(trigger.entity_id) not in ['---', '', 'Bereit', 'Idle', 'unknown', 'unavailable'] }}"
+  - condition: template
+    value_template: >
+      {% set status = states(trigger.entity_id) | string %}
+      {% set code_match = (status == (p_code | string) or (r_code != "" and status == (r_code | string))) %}
+      {{ code_match }}
+  - condition: template
+    value_template: >
+      {% if not time_check_active %}
+        true
+      {% else %}
+        {% set current_time = now().strftime('%H:%M:%S') %}
+        {% set current_day = now().strftime('%a') | lower %}
+        {{ current_day in days_allowed and start_t <= current_time <= end_t }}
+      {% endif %}
+
+action:
+  - choose:
+      # --- FALL 1: SPERRE ---
+      - conditions:
+          - condition: template
+            value_template: "{{ alarm_panel != 'none' and alarm_panel != none and not is_state(alarm_panel, 'disarmed') }}"
+        sequence:
+          - service: logbook.log
+            data:
+              name: "Zutrittskontrolle"
+              message: "❌ ZUTRITT GESPERRT: {{ person_name }} (Alarmanlage scharf)"
+              entity_id: "{{ w_sensor }}"
+          - if:
+              - condition: template
+                value_template: "{{ dash_log != '' }}"
+            then:
+              - service: input_text.set_value
+                target:
+                  entity_id: !input log_helper
+                data:
+                  value: >
+                    {% set new_entry = "❌ " + now().strftime('%H:%M') + " - GESPERRT: " + person_name %}
+                    {% set current_log = states(dash_log) %}
+                    {% if current_log == 'unknown' or current_log == 'unavailable' or current_log == 'Bereit' %}
+                      {{ new_entry }}
+                    {% else %}
+                      {{ (new_entry + "\n" + current_log).split("\n")[:5] | join("\n") }}
+                    {% endif %}
+          - service: notify.persistent_notification
+            data:
+              title: "⚠️ Zutritt verweigert"
+              message: "{{ person_name }} wurde abgewiesen, da die Alarmanlage scharf ist."
+
+      # --- FALL 2: ERFOLG ---
+      - conditions:
+          - condition: template
+            value_template: "{{ alarm_panel == 'none' or alarm_panel == none or is_state(alarm_panel, 'disarmed') }}"
+        sequence:
+          - service: logbook.log
+            data:
+              name: "Zutrittskontrolle"
+              message: "✅ ZUTRITT GEWÄHRT: {{ person_name }} {{ action_text }}"
+              entity_id: "{{ w_sensor }}"
+          - if:
+              - condition: template
+                value_template: "{{ dash_log != '' }}"
+            then:
+              - service: input_text.set_value
+                target:
+                  entity_id: !input log_helper
+                data:
+                  value: >
+                    {% set new_entry = "✅ " + now().strftime('%H:%M') + " - GEWÄHRT: " + person_name %}
+                    {% set current_log = states(dash_log) %}
+                    {% if current_log == 'unknown' or current_log == 'unavailable' or current_log == 'Bereit' %}
+                      {{ new_entry }}
+                    {% else %}
+                      {{ (new_entry + "\n" + current_log).split("\n")[:5] | join("\n") }}
+                    {% endif %}
+          
+          - parallel:
+              - sequence: # Hardware
+                  - if:
+                      - condition: template
+                        value_template: "{{ t_action_2.entity_id is defined or t_action_2.device_id is defined or t_action_2.area_id is defined }}"
+                    then:
+                      - service: "homeassistant.{{ action_mode }}"
+                        target: !input target_action_static
+                  - if:
+                      - condition: template
+                        value_template: "{{ t_action_3.entity_id is defined or t_action_3.device_id is defined or t_action_3.area_id is defined }}"
+                    then:
+                      - service: homeassistant.turn_on
+                        target: !input target_action_pulse
+                      - delay: 1
+                      - service: homeassistant.turn_off
+                        target: !input target_action_pulse
+                  - if:
+                      - condition: template
+                        value_template: "{{ t_action_1.entity_id is defined or t_action_1.device_id is defined or t_action_1.area_id is defined }}"
+                    then:
+                      - service: homeassistant.turn_on
+                        target: !input target_action_timed
+                      - delay: { seconds: "{{ t_delay }}" }
+                      - service: homeassistant.turn_off
+                        target: !input target_action_timed
+
+              - sequence: # Messaging
+                  - if:
+                      - condition: template
+                        value_template: "{{ wa_service != '' and wa_service != 'whatsapp_' }}"
+                    then:
+                      - service: "notify.{{ wa_service | replace('notify.', '') }}"
+                        data:
+                          message: "🔓 *Zutritt gewährt*: *{{ person_name }}* {{ action_text }}."
+                  - repeat:
+                      for_each: "{{ notify_dev }}"
+                      sequence:
+                        - service: "notify.mobile_app_{{ device_attr(repeat.item, 'name') | slugify }}"
+                          data:
+                            title: "Zutrittskontrolle"
+                            message: "{{ person_name }} {{ action_text }}."
