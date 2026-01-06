@@ -1,31 +1,23 @@
 esphome:
-  name: "wg-gateway-c3"
+  name: "wg-gateway-c"
   friendly_name: "Wiegand-Gateway-C3"
   project:
     name: "N-Software.Wiegand-Gateway"
-    version: "2.1.4"
+    version: "2.5.3"
   on_boot:
     priority: -10
     then:
-      - text_sensor.template.publish: {id: last_access_event, state: "---"}
+      - text_sensor.template.publish: {id: w_schnittstelle_display, state: "---"}
       - text_sensor.template.publish: {id: gateway_status, state: "Bereit"}
-      - text_sensor.template.publish: {id: raw_scan_preview, state: "---"}
       - text_sensor.template.publish:
           id: terminal_location_display
           state: !lambda "return id(terminal_location_storage);"
-      - text.set:
-          id: location_input
-          value: ""
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
-# Erforderlich für die Netzwerk-Initialisierung unter esp-idf
-network:
-
-# ================= KOMMUNIKATION ================= 
 logger:
   level: DEBUG
 
@@ -43,159 +35,313 @@ mqtt:
   username: !secret mqtt_user
   password: !secret mqtt_password
   id: mqtt_client
-  discovery: true
+  discovery: false 
   topic_prefix: wiegand-gateway
+  on_connect:
+    then:
+      - lambda: |-
+          std::string loc = id(terminal_location_storage);
+          id(mqtt_client).publish("wiegand/" + loc + "/connection", "online", 0, true);
+          id(connection_status).publish_state("Online");
+          
+          std::string topic = "wiegand/" + loc + "/led/command";
+          id(mqtt_client).subscribe(topic, [=](const std::string &topic, const std::string &payload) {
+            if (payload == "ON" || payload == "PRESS") {
+              id(reader_led_web).turn_on();
+            }
+          });
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (id(mqtt_client).is_connected()) {
+            std::string loc = id(terminal_location_storage);
+            id(mqtt_client).publish("wiegand/" + loc + "/ip", id(ip_sensor).state, 0, true);
+            id(mqtt_client).publish("wiegand/" + loc + "/wlan", std::to_string((int)id(wlan_signal_sensor).state), 0, true);
+            id(mqtt_client).publish("wiegand/" + loc + "/connection", "online", 0, true);
+          }
 
 web_server:
   port: 80
   version: 3
-  include_internal: true 
   local: true
 
-# ================= GLOBALE VARIABLEN ================= 
 globals:
   - id: pin_buffer
     type: std::string
     restore_value: no
     initial_value: '""'
-  
   - id: terminal_location_storage
     type: std::string
     restore_value: yes
     initial_value: '"Eingangsbereich"' 
 
-# ================= AUTOMATISCHE RESETS ================= 
 script:
-  - id: clear_pin_timeout
-    mode: restart
+  - id: dynamic_mqtt_publish
+    parameters:
+      sub_path: string
+      payload: string
+    mode: parallel
     then:
-      - delay: 5s
-      - lambda: 'id(pin_buffer).clear();'
-      - text_sensor.template.publish: {id: gateway_status, state: "Bereit"}
-    
+      - lambda: |-
+          std::string loc = id(terminal_location_storage);
+          std::string topic = "wiegand/" + loc + "/" + sub_path;
+          topic.erase(std::remove(topic.begin(), topic.end(), ' '), topic.end());
+          if (id(mqtt_client).is_connected()) {
+            id(mqtt_client).publish(topic, payload);
+          }
+
   - id: reset_display_script
     mode: restart
     then:
-      - delay: 10s 
-      - text_sensor.template.publish: {id: last_access_event, state: "---"}
+      - delay: 5s 
+      - text_sensor.template.publish: {id: w_schnittstelle_display, state: "---"}
       - text_sensor.template.publish: {id: gateway_status, state: "Bereit"}
-      - text_sensor.template.publish: {id: raw_scan_preview, state: "---"}
-
-# ================= WEB INTERFACE ELEMENTE ================= 
+      - lambda: |-
+          std::string loc = id(terminal_location_storage);
+          id(mqtt_client).publish_json("wiegand/" + loc + "/event", [=](JsonObject root) {
+            root["type"] = "reset";
+            root["value"] = "---";
+          });
 
 text:
   - platform: template
     name: "01. Montageort ändern"
     id: location_input
-    icon: "mdi:square-edit-outline"
+    icon: "mdi:map-marker-edit"
     mode: text
-    internal: true 
-    lambda: 'return {};' 
     set_action:
       then:
         - lambda: |-
-            std::string input = x;
-            input.erase(0, input.find_first_not_of(" "));
-            input.erase(input.find_last_not_of(" ") + 1);
+            std::string old_loc = id(terminal_location_storage);
+            std::string new_loc = x;
+            std::string device_id = "wg_" + old_loc;
+            device_id.erase(std::remove(device_id.begin(), device_id.end(), ' '), device_id.end());
 
-            if (input.length() > 0 && input.length() <= 16) {
-              id(terminal_location_storage) = input;
-              id(terminal_location_display).publish_state(input);
-              id(gateway_status).publish_state("Gespeichert! Neustart...");
-            } else if (input.length() > 16) {
-              id(gateway_status).publish_state("FEHLER: Max 16 Zeichen!");
-              id(reset_display_script).execute(); 
-            } else {
-              id(gateway_status).publish_state("FEHLER: Name leer!");
-              id(reset_display_script).execute();
+            if (new_loc.length() > 0 && new_loc.length() <= 16) {
+              id(gateway_status).publish_state("Entferne altes Gerät...");
+              
+              if (id(mqtt_client).is_connected()) {
+                id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/event/config", "", 0, true);
+                id(mqtt_client).publish("homeassistant/switch/" + device_id + "/led_sw/config", "", 0, true);
+                id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/status/config", "", 0, true);
+                id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/ip/config", "", 0, true);
+                id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/wlan/config", "", 0, true);
+              }
             }
-        - if:
-            condition:
-              lambda: |-
-                std::string input = x;
-                input.erase(0, input.find_first_not_of(" "));
-                input.erase(input.find_last_not_of(" ") + 1);
-                return input.length() > 0 && input.length() <= 16;
-            then:
-              - delay: 2000ms
-              - button.press: restart_button
+        - delay: 1500ms
+        - lambda: |-
+            id(gateway_status).publish_state("Ort wird gespeichert...");
+            id(terminal_location_storage) = x;
+        - delay: 1500ms
+        - lambda: |-
+            id(gateway_status).publish_state("Neustart erfolgt!");
+        - delay: 1000ms
+        - button.press: internal_restart_button
 
 text_sensor:
   - platform: template
-    name: "02. Wichtiger Hinweis"
-    id: renaming_notice_1
-    icon: "mdi:alert-circle-outline"
-    internal: true
-    lambda: 'return {"Nach Änderung erfolgt ein automatischer Neustart."};'
-
-  - platform: template
-    name: "03. "
-    id: renaming_notice_2
-    icon: "mdi:alert-circle-outline"
-    internal: true
-    lambda: 'return {"Max. 16 Zeichen! Umlaute & Leerzeichen vermeiden!"};'
-
-  - platform: template
-    name: "04. Letzter Scan (Rohdaten)"
-    id: raw_scan_preview
-    icon: "mdi:barcode-scan"
-    internal: true
-
-  - platform: template
-    name: "Aktueller Montageort"
     id: terminal_location_display
-    icon: "mdi:map-marker-radius"
+    name: "Aktueller Montageort"
+    icon: "mdi:map-marker"
 
   - platform: template
-    name: "Systemstatus"
-    id: gateway_status
+    name: "Info: Zeichen"
     icon: "mdi:information-outline"
+    lambda: |-
+      return {"Umlaute und Leerzeichen bitte vermeiden!"};
 
   - platform: template
+    name: "Info: System"
+    icon: "mdi:information-outline"
+    lambda: |-
+      return {"Nach Namensänderung erfolgt ein Neustart!"};
+
+  - platform: template
+    id: w_schnittstelle_display
     name: "W-Schnittstelle"
-    id: last_access_event
     icon: "mdi:ethernet"
+
+  - platform: template
+    id: gateway_status
+    name: "Systemstatus"
+    icon: "mdi:information-outline"
+    on_value:
+      then:
+        - script.execute: {id: dynamic_mqtt_publish, sub_path: "status", payload: !lambda "return x;"}
+
+  - platform: template
+    name: "Projekt"
+    icon: "mdi:github"
+    entity_category: diagnostic
+    lambda: |-
+      return {"N-Software Wiegand-Gateway"};
+
+  - platform: template
+    name: "Hardware"
+    icon: "mdi:chip"
+    entity_category: diagnostic
+    lambda: |-
+      return {"ESP32-C3 RFID & Keypad"};
+
+  - platform: template
+    id: connection_status
+    name: "MQTT Verbindung"
+    icon: "mdi:vector-link"
+    entity_category: diagnostic
 
   - platform: wifi_info
     ip_address:
+      id: ip_sensor
       name: "IP Adresse"
       icon: "mdi:ip-network"
-
-binary_sensor:
-  - platform: status
-    name: "Gateway Online"
-    icon: "mdi:check-network"
+      entity_category: diagnostic
 
 sensor:
   - platform: wifi_signal
-    name: "WLAN Signal"
-    update_interval: 60s
+    id: wlan_signal_sensor
+    name: "WLAN Signalstärke"
     icon: "mdi:wifi"
+    update_interval: 60s
+    entity_category: diagnostic
+
+switch:
+  - platform: gpio
+    pin: 2
+    id: reader_led_web
+    name: "Reader LED Schalter"
+    icon: "mdi:led-on"
+    inverted: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: |-
+          std::string topic = "wiegand/" + id(terminal_location_storage) + "/led/state";
+          id(mqtt_client).publish(topic, "ON");
+          id(w_schnittstelle_display).publish_state("---");
+      - delay: 1000ms
+      - switch.turn_off: reader_led_web
+    on_turn_off:
+      - lambda: |-
+          std::string topic = "wiegand/" + id(terminal_location_storage) + "/led/state";
+          id(mqtt_client).publish(topic, "OFF");
 
 button:
-  - platform: restart
+  - platform: template
+    id: restart_button_manual
     name: "Gateway Neustart"
-    id: restart_button
     icon: "mdi:restart"
+    entity_category: config
+    on_press:
+      then:
+        - text_sensor.template.publish: {id: gateway_status, state: "Manueller Neustart..."}
+        - delay: 1500ms
+        - button.press: internal_restart_button
 
-# ================= HARDWARE AUSGÄNGE ================= 
-output:
-  - platform: gpio
-    pin: GPIO2
-    id: push_pin_output
-    inverted: true
+  - platform: restart
+    id: internal_restart_button
+    internal: true
 
-light:
-  - platform: binary
-    id: reader_led
-    name: "Terminal LED"
-    output: push_pin_output
-    icon: "mdi:led-on"
-    on_turn_on:
-      - delay: 1s
-      - light.turn_off: reader_led
+  - platform: template
+    name: "📡 In Home Assistant registrieren"
+    id: ha_register_button
+    icon: "mdi:home-assistant"
+    entity_category: config
+    on_press:
+      then:
+        - lambda: |-
+            std::string loc = id(terminal_location_storage);
+            std::string device_id = "wg_" + loc;
+            device_id.erase(std::remove(device_id.begin(), device_id.end(), ' '), device_id.end());
 
-# ================= WIEGAND LOGIK ================= 
+            if (id(mqtt_client).is_connected()) {
+              auto get_device_info = [&](JsonObject dev) {
+                dev["identifiers"][0] = device_id;
+                dev["name"] = "Wiegand " + loc;
+                dev["model"] = "Wiegand-C3";
+                dev["mf"] = "N-Software";
+              };
+
+              id(mqtt_client).publish_json("homeassistant/sensor/" + device_id + "/event/config", [=](JsonObject root) {
+                root["name"] = "W-Schnittstelle";
+                root["icon"] = "mdi:ethernet";
+                root["state_topic"] = "wiegand/" + loc + "/event";
+                root["unique_id"] = device_id + "_event_v15";
+                root["value_template"] = "{{ value_json.value }}";
+                get_device_info(root.createNestedObject("device"));
+              }, 1, true);
+
+              id(mqtt_client).publish_json("homeassistant/switch/" + device_id + "/led_sw/config", [=](JsonObject root) {
+                root["name"] = "Terminal LED";
+                root["icon"] = "mdi:led-on";
+                root["command_topic"] = "wiegand/" + loc + "/led/command";
+                root["state_topic"] = "wiegand/" + loc + "/led/state";
+                root["unique_id"] = device_id + "_led_sw_v15";
+                get_device_info(root.createNestedObject("device"));
+              }, 1, true);
+
+              id(mqtt_client).publish_json("homeassistant/sensor/" + device_id + "/status/config", [=](JsonObject root) {
+                root["name"] = "Systemstatus";
+                root["icon"] = "mdi:information-outline";
+                root["state_topic"] = "wiegand/" + loc + "/status";
+                root["unique_id"] = device_id + "_status_v15";
+                get_device_info(root.createNestedObject("device"));
+              }, 1, true);
+
+              id(mqtt_client).publish_json("homeassistant/sensor/" + device_id + "/ip/config", [=](JsonObject root) {
+                root["name"] = "IP Adresse";
+                root["icon"] = "mdi:ip-network";
+                root["state_topic"] = "wiegand/" + loc + "/ip";
+                root["unique_id"] = device_id + "_ip_v15";
+                get_device_info(root.createNestedObject("device"));
+              }, 1, true);
+
+              id(mqtt_client).publish_json("homeassistant/sensor/" + device_id + "/wlan/config", [=](JsonObject root) {
+                root["name"] = "WLAN Signal";
+                root["icon"] = "mdi:wifi";
+                root["state_topic"] = "wiegand/" + loc + "/wlan";
+                root["unique_id"] = device_id + "_wlan_v15";
+                root["unit_of_meas"] = "dBm";
+                root["device_class"] = "signal_strength";
+                get_device_info(root.createNestedObject("device"));
+              }, 1, true);
+
+              id(gateway_status).publish_state("Registrierung läuft...");
+            }
+        - delay: 1000ms
+        - lambda: |-
+            std::string loc = id(terminal_location_storage);
+            id(mqtt_client).publish_json("wiegand/" + loc + "/event", [=](JsonObject root) {
+              root["type"] = "init";
+              root["value"] = "---";
+            }, 1, true); 
+            
+            id(wlan_signal_sensor).update();
+            id(mqtt_client).publish("wiegand/" + loc + "/ip", id(ip_sensor).state, 0, true);
+            id(gateway_status).publish_state("In Home Assistant registriert!");
+        - switch.turn_on: reader_led_web
+        - delay: 5s
+        - text_sensor.template.publish: {id: gateway_status, state: "Bereit"}
+
+  - platform: template
+    name: "🗑 Aus Home Assistant entfernen"
+    id: ha_unregister_button
+    icon: "mdi:delete-sweep"
+    entity_category: config
+    on_press:
+      then:
+        - lambda: |-
+            std::string loc = id(terminal_location_storage);
+            std::string device_id = "wg_" + loc;
+            if (id(mqtt_client).is_connected()) {
+              id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/event/config", "", 0, true);
+              id(mqtt_client).publish("homeassistant/switch/" + device_id + "/led_sw/config", "", 0, true);
+              id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/status/config", "", 0, true);
+              id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/ip/config", "", 0, true);
+              id(mqtt_client).publish("homeassistant/sensor/" + device_id + "/wlan/config", "", 0, true);
+              id(gateway_status).publish_state("Entfernt");
+            }
+
 wiegand:
   - id: wiegand_reader
     d0: 5
@@ -205,13 +351,10 @@ wiegand:
         - lambda: |-
             char raw_chars[20];
             sprintf(raw_chars, "%llu", value);
-            id(raw_scan_preview).publish_state(raw_chars);
-
             auto publish_data = [&](std::string type, std::string val) {
               std::string loc = id(terminal_location_storage);
               std::string topic = "wiegand/" + loc + "/event";
               topic.erase(std::remove(topic.begin(), topic.end(), ' '), topic.end());
-
               if (id(mqtt_client).is_connected()) {
                 id(mqtt_client).publish_json(topic, [=](JsonObject root) {
                   root["type"] = type;
@@ -219,28 +362,16 @@ wiegand:
                   root["location"] = loc;
                 });
               }
-              id(last_access_event).publish_state(val);
+              id(w_schnittstelle_display).publish_state(val);
               id(gateway_status).publish_state("An " + loc + " gesendet");
               id(reset_display_script).execute();
             };
-
-            if (bits >= 24) {
-              publish_data("rfid", raw_chars);
-            }
-            
+            if (bits >= 24) { publish_data("rfid", raw_chars); }
             if (bits == 4 || bits == 8) {
               if (value <= 9) {
                 id(pin_buffer) += std::to_string(value);
-                id(gateway_status).publish_state("Eingabe...");
-                id(clear_pin_timeout).execute();
-              } else if (value == 11) {
-                if (!id(pin_buffer).empty()) {
-                  publish_data("pin", id(pin_buffer));
-                  id(pin_buffer).clear();
-                }
-              } else if (value == 10) {
+              } else if (value == 11 && !id(pin_buffer).empty()) {
+                publish_data("pin", id(pin_buffer));
                 id(pin_buffer).clear();
-                id(gateway_status).publish_state("Abgebrochen");
-                id(reset_display_script).execute();
               }
             }
