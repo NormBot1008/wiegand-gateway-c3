@@ -1,3 +1,8 @@
+Hinweis: Die Commit-Nachricht v2.1.6 ist veraltet; das Repository enthält bereits die stabile Version v2.5.3. Diese Version bietet volle Unterstützung für automatische MQTT-Deregistrierung und erweiterten System-Status.
+
+
+
+
 \# 🔑 N-Software Wiegand-Gateway \& Zutrittskontrolle
 
 \*\*Eine professionelle Komplettlösung für ESP32-C3 \& Home Assistant\*\*
@@ -81,3 +86,4 @@ mqtt:
       value_template: "{{ value_json.value }}"
       # WICHTIG: Verhindert, dass jeder Scan das HA-Logbuch füllt
       # Das Blueprint übernimmt das saubere Logging selbst!
+
