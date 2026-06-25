@@ -64,6 +64,8 @@ Lade die Datei `wiegand\_gateway.yaml` herunter und flashe sie auf deinen ESP32-
 \### 3. Home Assistant Sensor
 
 
+\### 4. Log-Helfer (Optional)
+hier ist noch ein kleiner Bug drin der ist nicht Optional, bitte eine Datei anlegen dazu oder eine Selektieren dann sollte sich das speichern lassen
 
 ### 🔐 Sicherheitshinweis: Web-Interface schützen
 Standardmäßig ist das Web-Interface des Gateways ohne Passwort erreichbar, um die Ersteinrichtung zu erleichtern. Für den produktiven Einsatz empfehle ich dringend, einen Passwortschutz zu aktivieren.
